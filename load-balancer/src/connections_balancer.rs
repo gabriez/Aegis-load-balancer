@@ -33,7 +33,7 @@ impl Backends {
     pub fn list_backends(&self) -> HashMap<([u8; 4], u16), u32> {
         self.counter
             .iter()
-            .map(|((ip, port), count)| ((ip, u16::from_be(*port)), count))
+            .map(|((ip, port), count)| ((ip.clone(), u16::from_be(*port)), *count))
             .collect()
     }
 

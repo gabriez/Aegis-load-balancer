@@ -40,7 +40,7 @@ pub mod TcpFlags {
     pub const FIN: u8 = 0b00000001;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub enum TcpFlagsEnum {
     CWR,
     ECE,

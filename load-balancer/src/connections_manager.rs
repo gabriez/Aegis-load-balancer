@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use log::{error, info, warn};
 use network_types::{ip::Ipv4Hdr, tcp};
 use thiserror::Error;
-use tokio::{sync, sync::RwLock, task::JoinSet};
+use tokio::{sync, sync::RwLock, task::JoinSet, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{connections_balancer::BackendSelector, TcpFlagsEnum, TcpState};
@@ -27,7 +27,7 @@ impl PortsPool {
         let mut ports = Vec::with_capacity(capacity);
 
         for i in 0..capacity {
-            ports.push(Some((min_port + i).to_be() as u16));
+            ports.push(Some((min_port + i as u16).to_be() as u16));
         }
         Self {
             max_ports: capacity,
@@ -286,13 +286,13 @@ pub enum NatTableError {
 
 #[derive(Debug, Clone)]
 pub struct TcpConnState {
-    last_seen: std::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
+    last_seen: tokio::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
     last_tcp_flag: TcpFlagsEnum, // The last TCP flag received for this connection, used to manage the state of the TCP connection
     state: TcpState, // The current state of the TCP connection, used to manage the connection lifecycle
-    last_packet_origin: TcpPacketOrigin,
+    last_origin: TcpPacketOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub struct TcpUpdateState {
     flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
     origin: TcpPacketOrigin,
@@ -363,7 +363,7 @@ async fn connections_manager(
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
 
 async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNewConn) -> u16 {
-    let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(60)); // TODO: define timeout duration
+    let timeout = time::sleep(time::Duration::from_secs(60)); // TODO: define timeout duration
     let TcpNewConn {
         proxy_port,
         flag,
@@ -374,11 +374,11 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
     tokio::pin!(timeout);
 
     let mut tcp_state: TcpConnState = TcpConnState {
-        last_seen: std::time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
+        last_seen: time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
         last_tcp_flag: flag, // The last TCP flag received for this connection, used to manage the state of the TCP connection
         state: TcpState::SynReceived,
         // The current state of the TCP connection, used to manage the connection lifecycle
-        last_packet_origin: origin,
+        last_origin: origin,
     };
 
     let mut rx_flag_notified = rx_flag.clone();
@@ -392,13 +392,29 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
             }
             _ = rx_flag_notified.changed() => {
 
-                    let new_flag = rx_flag.borrow();
+                    let TcpUpdateState { flag, origin } = *rx_flag.borrow();
 
+                    match (flag, origin) {
+                        (TcpFlagsEnum::SYN, TcpPacketOrigin::Client) => {
+                            tcp_state.state = TcpState::SynReceived;
 
+                        }
+                        (TcpFlagsEnum::SYN, TcpPacketOrigin::Backend) if tcp_state.last_tcp_flag == TcpFlagsEnum::SYN && tcp_state.last_origin == TcpPacketOrigin::Client => {
+                            tcp_state.state = TcpState::SynSent;
+                        }
+                        (TcpFlagsEnum::ACK, TcpPacketOrigin::Client) if tcp_state.last_tcp_flag == TcpFlagsEnum::SYN && tcp_state.last_origin == TcpPacketOrigin::Backend => {
+                            tcp_state.state = TcpState::Established;
+                        }
+                        _ => {}
+                    }
+
+                    tcp_state.last_origin = origin;
+                    tcp_state.last_tcp_flag = flag;
                     // Update the TCP state based on the new flag
-                    println!("TCP flag changed for connection {:?}: {:?}", tcp_state, new_flag);
+                    println!("TCP flag changed for connection {:?}: {:?}", tcp_state, flag);
                     // Reset the timeout on activity
-                    timeout.as_mut().reset(tokio::time::Instant::now() + tokio::time::Duration::from_secs(60));
+                    tcp_state.last_seen = time::Instant::now();
+                    timeout.as_mut().reset(time::Instant::now() + time::Duration::from_secs(60));
             }
             _ = cancel_token.cancelled() => {
                return 0 ;

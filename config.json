@@ -2,6 +2,6 @@
 	"rx_ports": [],
 	"backends_addresses": [],
 	"blocklist": [
-        [127, 0, 0, 1]
+        [129, 0, 0, 1]
     ]
 }
