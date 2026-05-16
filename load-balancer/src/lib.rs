@@ -1,6 +1,6 @@
 use std::fmt;
 
-use network_types::tcp::TcpHdr;
+use network_types::{bitfield::BitfieldUnit, tcp::TcpHdr};
 use thiserror::Error;
 
 pub mod config;
@@ -38,62 +38,23 @@ pub mod TcpFlags {
     pub const SYN: u8 = 0b00000010;
     /// FIN – No more data from sender.
     pub const FIN: u8 = 0b00000001;
-}
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-pub enum TcpFlagsEnum {
-    CWR,
-    ECE,
-    URG,
-    ACK,
-    PSH,
-    RST,
-    SYN,
-    FIN,
-}
+    pub const SYN_ACK: u8 = Self::SYN | Self::ACK;
 
-impl TcpFlagsEnum {
-    pub fn from_u8(flag: u8) -> Result<Self, TcpFlagsError> {
-        match flag {
-            TcpFlags::CWR => Ok(TcpFlagsEnum::CWR),
-            TcpFlags::ECE => Ok(TcpFlagsEnum::ECE),
-            TcpFlags::URG => Ok(TcpFlagsEnum::URG),
-            TcpFlags::ACK => Ok(TcpFlagsEnum::ACK),
-            TcpFlags::PSH => Ok(TcpFlagsEnum::PSH),
-            TcpFlags::RST => Ok(TcpFlagsEnum::RST),
-            TcpFlags::SYN => Ok(TcpFlagsEnum::SYN),
-            TcpFlags::FIN => Ok(TcpFlagsEnum::FIN),
-            _ => Err(TcpFlagsError::InvalidFlagValue(flag)),
-        }
-    }
-
-    pub fn from_tcp_hdr(tcp_hdr: &TcpHdr) -> Self {
-        let flags_byte = tcp_hdr._bitfield_1.get(0usize, 4u8) as u8;
-        TcpFlagsEnum::from_u8(flags_byte).unwrap_or(TcpFlagsEnum::ACK)
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum TcpFlagsError {
-    #[error("Invalid TCP flag value: {0}")]
-    InvalidFlagValue(u8),
+    pub const FIN_ACK: u8 = Self::FIN | Self::ACK;
 }
 
 /// State of TCP connection.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
-pub enum TcpState {
+// I decided that we are only managing the states of the connection that are relevant for our use case because
+// we don't need to know every state of the TCP connection in a socket because we are not using sockets
+
+pub enum HalfState {
+    SynSeen,
+    FinSeen,
+    RstSeen,
+    Established,
     Closed,
     Listen,
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    CloseWait,
-    Closing,
-    LastAck,
-    TimeWait,
-    DeleteTcb,
 }
 
 impl fmt::Display for TcpState {

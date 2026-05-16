@@ -1,12 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info, warn};
-use network_types::{ip::Ipv4Hdr, tcp};
+use network_types::{bitfield::BitfieldUnit, ip::Ipv4Hdr, tcp};
 use thiserror::Error;
 use tokio::{sync, sync::RwLock, task::JoinSet, time};
 use tokio_util::sync::CancellationToken;
 
-use crate::{connections_balancer::BackendSelector, TcpFlagsEnum, TcpState};
+use crate::{
+    connections_balancer::BackendSelector,
+    HalfState,
+    TcpFlags::{self, ACK, FIN, RST, SYN, SYN_ACK},
+    TcpFlagsBitField, TcpState,
+};
 
 const MIN_PORT: u16 = 32768;
 const MAX_PORT: u16 = 60999;
@@ -110,20 +115,6 @@ impl NatTable {
         }
     }
 
-    /// Closes a connection and cleans up the corresponding NAT entry. It takes the proxy port as a parameter, checks if a NAT entry exists for the given port, and if it does, it removes the NAT entry from the nat_map, removes the client mapping from the client_map, releases the proxy port back to the ports pool, and returns the removed NAT entry. If no NAT entry exists for the given port, it returns an error indicating that the connection was not found.
-    pub fn close_connection(&mut self, port: u16) -> Result<NatEntry, NatTableError> {
-        // Implementation for closing a connection and cleaning up NAT entries
-
-        if let Some(nat_entry) = self.nat_map.remove(&port) {
-            self.client_map
-                .remove(&ClientKey::new(nat_entry.client_ip, nat_entry.client_port));
-            self.ports_pool.release_port(port);
-            Ok(nat_entry)
-        } else {
-            Err(NatTableError::ConnectionNotFound)
-        }
-    }
-
     pub fn new_conn(
         &mut self,
         client_port: u16,
@@ -147,8 +138,8 @@ impl NatTable {
             destination_port,
             destination_ip,
             tx_flag: sync::watch::channel(TcpUpdateState {
-                flag: TcpFlagsEnum::SYN,
-                origin: TcpPacketOrigin::Client,
+                flags: SYN,
+                origin: PacketOrigin::Client,
             })
             .0,
         };
@@ -231,7 +222,14 @@ pub trait NatTableManager {
 
 impl NatTableManager for NatTable {
     fn close_connection(&mut self, port: u16) -> Result<NatEntry, NatTableError> {
-        self.close_connection(port)
+        if let Some(nat_entry) = self.nat_map.remove(&port) {
+            self.client_map
+                .remove(&ClientKey::new(nat_entry.client_ip, nat_entry.client_port));
+            self.ports_pool.release_port(port);
+            Ok(nat_entry)
+        } else {
+            Err(NatTableError::ConnectionNotFound)
+        }
     }
 
     fn new_conn(
@@ -284,32 +282,23 @@ pub enum NatTableError {
     ConnectionNotFound,
 }
 
-#[derive(Debug, Clone)]
-pub struct TcpConnState {
-    last_seen: tokio::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
-    last_tcp_flag: TcpFlagsEnum, // The last TCP flag received for this connection, used to manage the state of the TCP connection
-    state: TcpState, // The current state of the TCP connection, used to manage the connection lifecycle
-    last_origin: TcpPacketOrigin,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub struct TcpUpdateState {
-    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
-    origin: TcpPacketOrigin,
+    flags: u8, // The current state of the TCP connection, used to manage the connection lifecycle
+    origin: PacketOrigin,
 }
 
 #[derive(Debug, Clone)]
 pub struct TcpNewConn {
     proxy_port: u16,
-    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
-    origin: TcpPacketOrigin,
+    flags: u8, // The current state of the TCP connection, used to manage the connection lifecycle. Flags are stored in bytes, so we must use bitwise operations to check which flags are set.
     rx_flag: sync::watch::Receiver<TcpUpdateState>,
 }
 
 #[derive(Copy, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TcpPacketOrigin {
+pub enum PacketOrigin {
     Client,
-    Backend,
+    Server,
 }
 
 async fn connections_manager(
@@ -359,65 +348,171 @@ async fn connections_manager(
 }
 
 // TODO: I need to study how to manage connections and the best patterns to follow in this case.
-// I can use this guide: https://www.rfc-editor.org/rfc/rfc793.html and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
+// I can use this guide: https://datatracker.ietf.org/doc/html/rfc9293#name-header-format and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
+// Diagram stolen from
+//                             +---------+ ---------\      active OPEN
+//                             |  CLOSED |            \    -----------
+//                             +---------+<---------\   \   create TCB
+//                               |     ^              \   \  snd SYN
+//                  passive OPEN |     |   CLOSE        \   \
+//                  ------------ |     | ----------       \   \
+//                   create TCB  |     | delete TCB         \   \
+//                               V     |                      \   \
+//           rcv RST (note 1)  +---------+            CLOSE    |    \
+//        -------------------->|  LISTEN |          ---------- |     |
+//       /                     +---------+          delete TCB |     |
+//      /           rcv SYN      |     |     SEND              |     |
+//     /           -----------   |     |    -------            |     V
+// +--------+      snd SYN,ACK  /       \   snd SYN          +--------+
+// |        |<-----------------           ------------------>|        |
+// |  SYN   |                    rcv SYN                     |  SYN   |
+// |  RCVD  |<-----------------------------------------------|  SENT  |
+// |        |                  snd SYN,ACK                   |        |
+// |        |------------------           -------------------|        |
+// +--------+   rcv ACK of SYN  \       /  rcv SYN,ACK       +--------+
+//    |         --------------   |     |   -----------
+//    |                x         |     |     snd ACK
+//    |                          V     V
+//    |  CLOSE                 +---------+
+//    | -------                |  ESTAB  |
+//    | snd FIN                +---------+
+//    |                 CLOSE    |     |    rcv FIN
+//    V                -------   |     |    -------
+// +---------+         snd FIN  /       \   snd ACK         +---------+
+// |  FIN    |<----------------          ------------------>|  CLOSE  |
+// | WAIT-1  |------------------                            |   WAIT  |
+// +---------+          rcv FIN  \                          +---------+
+//   | rcv ACK of FIN   -------   |                          CLOSE  |
+//   | --------------   snd ACK   |                         ------- |
+//   V        x                   V                         snd FIN V
+// +---------+               +---------+                    +---------+
+// |FINWAIT-2|               | CLOSING |                    | LAST-ACK|
+// +---------+               +---------+                    +---------+
+//   |              rcv ACK of FIN |                 rcv ACK of FIN |
+//   |  rcv FIN     -------------- |    Timeout=2MSL -------------- |
+//   |  -------            x       V    ------------        x       V
+//    \ snd ACK              +---------+delete TCB          +---------+
+//      -------------------->|TIME-WAIT|------------------->| CLOSED  |
+//                           +---------+                    +---------+
+
+/// Helper function to manage TCP flags and update the connection state accordingly.
+/// It takes the TCP flags, the origin of the packet (client or server), and mutable references to the
+/// server and client connection states. Based on the flags received, it updates the connection states for both the
+/// client and server, transitioning through states such as SYN seen, FIN seen, RST seen, established, and closed.
+/// This function is crucial for managing the lifecycle of TCP connections in the connections manager.
+pub fn set_conn_state(
+    flags: u8,
+    origin: PacketOrigin,
+    server_state: &mut ConnState,
+    client_state: &mut ConnState,
+) {
+    match flags {
+        f if f & SYN != 0 => {
+            if origin == PacketOrigin::Client {
+                client_state.state = HalfState::SynSeen;
+            } else {
+                server_state.state = HalfState::SynSeen;
+            }
+        }
+        f if f & FIN != 0 => {
+            if origin == PacketOrigin::Client {
+                client_state.state = HalfState::FinSeen;
+            } else {
+                server_state.state = HalfState::FinSeen;
+            }
+        }
+        f if f & RST != 0 => {
+            if origin == PacketOrigin::Client {
+                client_state.state = HalfState::RstSeen;
+            } else {
+                server_state.state = HalfState::RstSeen;
+            }
+        }
+        _ => {}
+    }
+
+    if client_state.state == HalfState::SynSeen && server_state.state == HalfState::SynSeen {
+        client_state.state = HalfState::Established;
+        server_state.state = HalfState::Established;
+    }
+
+    if client_state.state == HalfState::FinSeen && server_state.state == HalfState::FinSeen {
+        client_state.state = HalfState::Closed;
+        server_state.state = HalfState::Closed;
+    }
+}
+
+/// Struct to represent state of TCP connections individually. It holds the origin of the last TCP packet received (client or server), the last TCP flags received, the current state of the TCP connection, and the timestamp of the last packet seen for this connection.
+///  This struct is used to manage the state of each TCP connection in the connections manager.
+#[derive(Debug)]
+pub struct ConnState {
+    last_tcp_flag: u8,
+    state: HalfState,
+    last_seen: time::Instant,
+}
 
 async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNewConn) -> u16 {
-    let timeout = time::sleep(time::Duration::from_secs(60)); // TODO: define timeout duration
+    let timeout = time::sleep(time::Duration::from_secs(60));
     let TcpNewConn {
         proxy_port,
-        flag,
-        origin,
+        flags,
         rx_flag,
     } = tcp_new_conn;
 
     tokio::pin!(timeout);
 
-    let mut tcp_state: TcpConnState = TcpConnState {
-        last_seen: time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
-        last_tcp_flag: flag, // The last TCP flag received for this connection, used to manage the state of the TCP connection
-        state: TcpState::SynReceived,
-        // The current state of the TCP connection, used to manage the connection lifecycle
-        last_origin: origin,
+    let mut server_state = ConnState {
+        last_tcp_flag: 0,
+        state: HalfState::Listen,
+        last_seen: time::Instant::now(),
+    };
+
+    let mut client_state = ConnState {
+        last_tcp_flag: flags,
+        state: HalfState::SynSeen,
+        last_seen: time::Instant::now(),
     };
 
     let mut rx_flag_notified = rx_flag.clone();
 
-    loop {
+    'outer: loop {
         tokio::select! {
             _ = &mut timeout => {
                 // Handle connection timeout, e.g., remove the connection from the manager
-                println!("Connection timed out: {:?}", tcp_state);
+                println!("Connection timed out: \n Server: {:?}\n Client: {:?}", server_state, client_state);
                 return proxy_port;
             }
             _ = rx_flag_notified.changed() => {
-
-                    let TcpUpdateState { flag, origin } = *rx_flag.borrow();
-
-                    match (flag, origin) {
-                        (TcpFlagsEnum::SYN, TcpPacketOrigin::Client) => {
-                            tcp_state.state = TcpState::SynReceived;
-
-                        }
-                        (TcpFlagsEnum::SYN, TcpPacketOrigin::Backend) if tcp_state.last_tcp_flag == TcpFlagsEnum::SYN && tcp_state.last_origin == TcpPacketOrigin::Client => {
-                            tcp_state.state = TcpState::SynSent;
-                        }
-                        (TcpFlagsEnum::ACK, TcpPacketOrigin::Client) if tcp_state.last_tcp_flag == TcpFlagsEnum::SYN && tcp_state.last_origin == TcpPacketOrigin::Backend => {
-                            tcp_state.state = TcpState::Established;
-                        }
-                        _ => {}
+                    if server_state.state == TcpState::TimeWait {
+                        continue;
                     }
 
-                    tcp_state.last_origin = origin;
-                    tcp_state.last_tcp_flag = flag;
-                    // Update the TCP state based on the new flag
-                    println!("TCP flag changed for connection {:?}: {:?}", tcp_state, flag);
-                    // Reset the timeout on activity
-                    tcp_state.last_seen = time::Instant::now();
+                    let TcpUpdateState { flags, origin } = *rx_flag.borrow();
+
+                    set_conn_state(flags, origin, &mut server_state, &mut client_state);
+
+                    if server_state.state == HalfState::Closed || client_state.state == HalfState::Closed || server_state.state == HalfState::RstSeen || client_state.state == HalfState::RstSeen {
+                        return proxy_port;
+                    }
+
+                    match origin {
+                        PacketOrigin::Client => {
+                            println!("TCP flag changed for client connection {:?}: {:?}", client_state, flag);
+                            client_state.last_tcp_flag = flag;
+                            client_state.last_seen = time::Instant::now();
+                        }
+                        PacketOrigin::Server => {
+                            println!("TCP flag changed for server connection {:?}: {:?}", server_state, flag);
+                            server_state.last_tcp_flag = flag;
+                            server_state.last_seen = time::Instant::now();
+                        }
+                    }
+
                     timeout.as_mut().reset(time::Instant::now() + time::Duration::from_secs(60));
             }
             _ = cancel_token.cancelled() => {
-               return 0 ;
+               return proxy_port ;
             }
         }
     }
@@ -452,12 +547,12 @@ impl AddressProvider {
         }
     }
 
-    pub fn check_origin(&self, ip: [u8; 4], port: u16) -> TcpPacketOrigin {
+    pub fn check_origin(&self, ip: [u8; 4], port: u16) -> PacketOrigin {
         let backends = self.backends.blocking_read();
         if backends.backend_exist(ip, port) {
-            TcpPacketOrigin::Backend
+            PacketOrigin::Server
         } else {
-            TcpPacketOrigin::Client
+            PacketOrigin::Client
         }
     }
 
@@ -467,22 +562,23 @@ impl AddressProvider {
         tcp_hdr: &tcp::TcpHdr,
     ) -> Option<RedirectionAddress> {
         let origin = self.check_origin(ipv4_hdr.src_addr, tcp_hdr.source);
-        let flag = TcpFlagsEnum::from_tcp_hdr(&tcp_hdr);
+
+        let flags = unsafe { ::core::mem::transmute(tcp_hdr._bitfield_1.get(8usize, 8u8) as u8) };
 
         match origin {
-            TcpPacketOrigin::Client => {
+            PacketOrigin::Client => {
                 if let Some((addr, tx)) =
                     self.get_backend_address(ipv4_hdr.src_addr, tcp_hdr.source)
                 {
-                    tx.send(TcpUpdateState { flag, origin });
+                    tx.send(TcpUpdateState { flags, origin });
                     return Some(addr);
                 }
 
-                self.new_connection(ipv4_hdr.src_addr, tcp_hdr.source, tcp_hdr.dest)
+                self.new_connection(ipv4_hdr.src_addr, tcp_hdr.source, tcp_hdr.dest, flags)
             }
-            TcpPacketOrigin::Backend => {
+            PacketOrigin::Server => {
                 if let Some((addr, tx)) = self.get_client_address(tcp_hdr.dest) {
-                    tx.send(TcpUpdateState { flag, origin });
+                    tx.send(TcpUpdateState { flags, origin });
                     return Some(addr);
                 }
                 None
@@ -495,11 +591,17 @@ impl AddressProvider {
         client_ip: [u8; 4],
         client_port: u16,
         client_dst_port: u16,
+        flags: u8,
     ) -> Option<RedirectionAddress> {
         let destination = {
             let mut backends = self.backends.blocking_write();
             backends.select_backend()
         };
+
+        if (flags != SYN) {
+            return None;
+        }
+
         if let Some((destination_ip, destination_port)) = destination {
             let mut lock_nat_table = self.nat_table.blocking_write();
             match lock_nat_table.new_conn(
@@ -512,8 +614,7 @@ impl AddressProvider {
                 Ok((proxy_port, nat_entry)) => {
                     let tcp_new_conn = TcpNewConn {
                         proxy_port,
-                        flag: TcpFlagsEnum::SYN,
-                        origin: TcpPacketOrigin::Client,
+                        flags,
                         rx_flag: nat_entry.tx_flag.subscribe(),
                     };
                     if let Err(e) = self.tx_new_conn.blocking_send(tcp_new_conn) {
