@@ -54,6 +54,7 @@ pub enum HalfState {
     RstSeen,
     Established,
     Closed,
+    Closing,
     Listen,
 }
 

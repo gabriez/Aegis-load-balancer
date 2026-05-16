@@ -408,12 +408,17 @@ pub fn set_conn_state(
     client_state: &mut ConnState,
 ) {
     match flags {
-        f if f & SYN != 0 => {
-            if origin == PacketOrigin::Client {
-                client_state.state = HalfState::SynSeen;
-            } else {
-                server_state.state = HalfState::SynSeen;
-            }
+        f if f & RST != 0 => {
+            client_state.state = HalfState::RstSeen;
+            server_state.state = HalfState::RstSeen;
+        }
+
+        f if f & SYN_ACK != 0 && origin == PacketOrigin::Server => {
+            server_state.state = HalfState::SynSeen;
+        }
+
+        f if f & SYN != 0 && origin == PacketOrigin::Client => {
+            client_state.state = HalfState::SynSeen;
         }
         f if f & FIN != 0 => {
             if origin == PacketOrigin::Client {
@@ -422,25 +427,35 @@ pub fn set_conn_state(
                 server_state.state = HalfState::FinSeen;
             }
         }
-        f if f & RST != 0 => {
-            if origin == PacketOrigin::Client {
-                client_state.state = HalfState::RstSeen;
-            } else {
-                server_state.state = HalfState::RstSeen;
+        f if f & ACK != 0 => {
+            if origin == PacketOrigin::Client
+                && client_state.state == HalfState::SynSeen
+                && server_state.state == HalfState::SynSeen
+            {
+                client_state.state = HalfState::Established;
+                server_state.state = HalfState::Established;
+            }
+
+            if origin == PacketOrigin::Server && client_state.state == HalfState::FinSeen {
+                client_state.state = HalfState::Closing;
+            }
+
+            if origin == PacketOrigin::Client && server_state.state == HalfState::FinSeen {
+                server_state.state = HalfState::Closing;
             }
         }
         _ => {}
     }
 
-    if client_state.state == HalfState::SynSeen && server_state.state == HalfState::SynSeen {
-        client_state.state = HalfState::Established;
-        server_state.state = HalfState::Established;
-    }
+    // if client_state.state == HalfState::SynSeen && server_state.state == HalfState::SynSeen {
+    //     client_state.state = HalfState::Established;
+    //     server_state.state = HalfState::Established;
+    // }
 
-    if client_state.state == HalfState::FinSeen && server_state.state == HalfState::FinSeen {
-        client_state.state = HalfState::Closed;
-        server_state.state = HalfState::Closed;
-    }
+    // if client_state.state == HalfState::FinSeen && server_state.state == HalfState::FinSeen {
+    //     client_state.state = HalfState::Closed;
+    //     server_state.state = HalfState::Closed;
+    // }
 }
 
 /// Struct to represent state of TCP connections individually. It holds the origin of the last TCP packet received (client or server), the last TCP flags received, the current state of the TCP connection, and the timestamp of the last packet seen for this connection.
@@ -484,17 +499,7 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
                 return proxy_port;
             }
             _ = rx_flag_notified.changed() => {
-                    if server_state.state == TcpState::TimeWait {
-                        continue;
-                    }
-
                     let TcpUpdateState { flags, origin } = *rx_flag.borrow();
-
-                    set_conn_state(flags, origin, &mut server_state, &mut client_state);
-
-                    if server_state.state == HalfState::Closed || client_state.state == HalfState::Closed || server_state.state == HalfState::RstSeen || client_state.state == HalfState::RstSeen {
-                        return proxy_port;
-                    }
 
                     match origin {
                         PacketOrigin::Client => {
@@ -507,6 +512,16 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
                             server_state.last_tcp_flag = flag;
                             server_state.last_seen = time::Instant::now();
                         }
+                    }
+
+                    if server_state.state == TcpState::Closing {
+                        continue;
+                    }
+
+                    set_conn_state(flags, origin, &mut server_state, &mut client_state);
+
+                    if server_state.state == HalfState::RstSeen || client_state.state == HalfState::RstSeen {
+                        return proxy_port;
                     }
 
                     timeout.as_mut().reset(time::Instant::now() + time::Duration::from_secs(60));
