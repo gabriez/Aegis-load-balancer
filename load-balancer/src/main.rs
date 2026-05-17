@@ -5,7 +5,7 @@ use std::{
 };
 
 use agave_afxdp::{
-    device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
+    device::{NetworkDevice, QueueId, RingSizes},
     socket::Socket,
     umem::{PageAlignedMemory, SliceUmem},
 };
@@ -29,9 +29,6 @@ use load_balancer_common::MAX_BLOCKLIST_ENTRIES;
 use log::{debug, warn};
 use tokio::{signal, sync::RwLock as TkRwLock};
 use tokio_util::sync::CancellationToken;
-
-const FRAME_SIZE: usize = 4096;
-const RING_SIZE: usize = 4096;
 
 #[derive(Debug, Parser)]
 struct Opt {

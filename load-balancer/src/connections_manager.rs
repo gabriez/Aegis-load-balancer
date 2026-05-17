@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info, warn};
-use network_types::{bitfield::BitfieldUnit, ip::Ipv4Hdr, tcp};
+use network_types::{ip::Ipv4Hdr, tcp};
 use thiserror::Error;
 use tokio::{sync, sync::RwLock, task::JoinSet, time};
 use tokio_util::sync::CancellationToken;
@@ -9,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     connections_balancer::BackendSelector,
     HalfState,
-    TcpFlags::{self, ACK, FIN, RST, SYN},
-    TcpFlagsBitField, TcpState,
+    TcpFlags::{ACK, FIN, RST, SYN},
 };
 
 const MIN_PORT: u16 = 32768;
@@ -452,7 +451,7 @@ pub fn set_conn_state(
 ///  This struct is used to manage the state of each TCP connection in the connections manager.
 #[derive(Debug)]
 pub struct ConnState {
-    last_tcp_flag: u8,
+    last_tcp_flags: u8,
     state: HalfState,
     last_seen: time::Instant,
 }
@@ -468,20 +467,20 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
     tokio::pin!(timeout);
 
     let mut server_state = ConnState {
-        last_tcp_flag: 0,
+        last_tcp_flags: 0,
         state: HalfState::Listen,
         last_seen: time::Instant::now(),
     };
 
     let mut client_state = ConnState {
-        last_tcp_flag: flags,
+        last_tcp_flags: flags,
         state: HalfState::SynSeen,
         last_seen: time::Instant::now(),
     };
 
     let mut rx_flag_notified = rx_flag.clone();
 
-    'outer: loop {
+    loop {
         tokio::select! {
             _ = &mut timeout => {
                 // Handle connection timeout, e.g., remove the connection from the manager
@@ -493,18 +492,18 @@ async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNew
 
                     match origin {
                         PacketOrigin::Client => {
-                            println!("TCP flag changed for client connection {:?}: {:?}", client_state, flag);
-                            client_state.last_tcp_flag = flag;
+                            println!("TCP flag changed for client connection {:?}: {:?}", client_state, flags);
+                            client_state.last_tcp_flags = flags;
                             client_state.last_seen = time::Instant::now();
                         }
                         PacketOrigin::Server => {
-                            println!("TCP flag changed for server connection {:?}: {:?}", server_state, flag);
-                            server_state.last_tcp_flag = flag;
+                            println!("TCP flag changed for server connection {:?}: {:?}", server_state, flags);
+                            server_state.last_tcp_flags = flags;
                             server_state.last_seen = time::Instant::now();
                         }
                     }
 
-                    if server_state.state == TcpState::Closing {
+                    if server_state.state == HalfState::Closing {
                         continue;
                     }
 
@@ -575,7 +574,7 @@ impl AddressProvider {
                 if let Some((addr, tx)) =
                     self.get_backend_address(ipv4_hdr.src_addr, tcp_hdr.source)
                 {
-                    tx.send(TcpUpdateState { flags, origin });
+                    let _ = tx.send(TcpUpdateState { flags, origin });
                     return Some(addr);
                 }
 
@@ -583,7 +582,7 @@ impl AddressProvider {
             }
             PacketOrigin::Server => {
                 if let Some((addr, tx)) = self.get_client_address(tcp_hdr.dest) {
-                    tx.send(TcpUpdateState { flags, origin });
+                    let _ = tx.send(TcpUpdateState { flags, origin });
                     return Some(addr);
                 }
                 None
@@ -591,7 +590,7 @@ impl AddressProvider {
         }
     }
 
-    pub fn new_connection(
+    fn new_connection(
         &self,
         client_ip: [u8; 4],
         client_port: u16,
@@ -603,7 +602,7 @@ impl AddressProvider {
             backends.select_backend()
         };
 
-        if (flags != SYN) {
+        if flags & SYN == 0 {
             return None;
         }
 

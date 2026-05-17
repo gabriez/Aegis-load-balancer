@@ -1,8 +1,5 @@
 use std::fmt;
 
-use network_types::{bitfield::BitfieldUnit, tcp::TcpHdr};
-use thiserror::Error;
-
 pub mod config;
 pub mod connections_balancer;
 pub mod connections_manager;
@@ -44,6 +41,7 @@ pub mod TcpFlags {
 // I decided that we are only managing the states of the connection that are relevant for our use case because
 // we don't need to know every state of the TCP connection in a socket because we are not using sockets
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum HalfState {
     SynSeen,
     FinSeen,
@@ -54,24 +52,19 @@ pub enum HalfState {
     Listen,
 }
 
-impl fmt::Display for TcpState {
+impl fmt::Display for HalfState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{}",
             match self {
-                TcpState::Closed => "CLOSED",
-                TcpState::Listen => "LISTEN",
-                TcpState::SynSent => "SYN_SENT",
-                TcpState::SynReceived => "SYN_RCVD",
-                TcpState::Established => "ESTABLISHED",
-                TcpState::FinWait1 => "FIN_WAIT_1",
-                TcpState::FinWait2 => "FIN_WAIT_2",
-                TcpState::CloseWait => "CLOSE_WAIT",
-                TcpState::Closing => "CLOSING",
-                TcpState::LastAck => "LAST_ACK",
-                TcpState::TimeWait => "TIME_WAIT",
-                TcpState::DeleteTcb => "DELETE_TCB",
+                HalfState::SynSeen => "SYN_SEEN",
+                HalfState::FinSeen => "FIN_SEEN",
+                HalfState::RstSeen => "RST_SEEN",
+                HalfState::Established => "ESTABLISHED",
+                HalfState::Closed => "CLOSED",
+                HalfState::Closing => "CLOSING",
+                HalfState::Listen => "LISTEN",
             }
         )
     }

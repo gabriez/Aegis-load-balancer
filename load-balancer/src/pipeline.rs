@@ -8,7 +8,7 @@ use log::warn;
 use thiserror::Error;
 
 use crate::{
-    connections_manager::AddressProvider,
+    connections_manager::RouteAddress,
     router::{get_mut_headers, route_packet, shift_mac},
 };
 
@@ -125,7 +125,7 @@ pub fn process_packets<'a>(
     // address_provider: &impl AddressProvider,
     mut received: PacketsBatch<'a>,
     umem: &mut SliceUmem<'a>,
-    address_provider: &AddressProvider,
+    address_provider: &impl RouteAddress,
 ) -> PacketsBatch<'a> {
     let mut routed: PacketsBatch = [const { None }; PACKETS_BATCH];
 
