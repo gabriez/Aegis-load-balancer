@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     connections_balancer::BackendSelector,
     HalfState,
-    TcpFlags::{self, ACK, FIN, RST, SYN, SYN_ACK},
+    TcpFlags::{self, ACK, FIN, RST, SYN},
     TcpFlagsBitField, TcpState,
 };
 
@@ -413,7 +413,7 @@ pub fn set_conn_state(
             server_state.state = HalfState::RstSeen;
         }
 
-        f if f & SYN_ACK != 0 && origin == PacketOrigin::Server => {
+        f if f & SYN != 0 && f & ACK != 0 && origin == PacketOrigin::Server => {
             server_state.state = HalfState::SynSeen;
         }
 
@@ -446,16 +446,6 @@ pub fn set_conn_state(
         }
         _ => {}
     }
-
-    // if client_state.state == HalfState::SynSeen && server_state.state == HalfState::SynSeen {
-    //     client_state.state = HalfState::Established;
-    //     server_state.state = HalfState::Established;
-    // }
-
-    // if client_state.state == HalfState::FinSeen && server_state.state == HalfState::FinSeen {
-    //     client_state.state = HalfState::Closed;
-    //     server_state.state = HalfState::Closed;
-    // }
 }
 
 /// Struct to represent state of TCP connections individually. It holds the origin of the last TCP packet received (client or server), the last TCP flags received, the current state of the TCP connection, and the timestamp of the last packet seen for this connection.

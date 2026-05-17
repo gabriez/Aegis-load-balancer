@@ -38,10 +38,6 @@ pub mod TcpFlags {
     pub const SYN: u8 = 0b00000010;
     /// FIN – No more data from sender.
     pub const FIN: u8 = 0b00000001;
-
-    pub const SYN_ACK: u8 = Self::SYN | Self::ACK;
-
-    pub const FIN_ACK: u8 = Self::FIN | Self::ACK;
 }
 
 /// State of TCP connection.
