@@ -5,7 +5,7 @@ use std::{
 };
 
 use agave_afxdp::{
-    device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
+    device::{NetworkDevice, QueueId, RingSizes},
     socket::Socket,
     umem::{PageAlignedMemory, SliceUmem},
 };
@@ -15,19 +15,20 @@ use aya::{
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
+use libc::{sysconf, _SC_PAGESIZE};
 use load_balancer::{
     config::Config,
-    process::{
+    connections_balancer::{BackendSelector, Backends},
+    connections_manager::{build_connections_manager, AddressProvider, NatTable, NatTableManager},
+    pipeline::{
         free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
-        release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
+        release_cq_frames, send_packets, FramesManager, PACKETS_BATCH,
     },
 };
 use load_balancer_common::MAX_BLOCKLIST_ENTRIES;
 use log::{debug, warn};
-use tokio::signal;
-
-const FRAME_SIZE: usize = 4096;
-const RING_SIZE: usize = 4096;
+use tokio::{signal, sync::RwLock as TkRwLock};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -46,18 +47,52 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Here we will pass the channel to the async function that will shutdown the program
-    // I might be using a oneshot channel for that purpose
-    run_af_xdp_socket().await?;
-    let ctrl_c = signal::ctrl_c();
+    let mut fut_joinset: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
+    let cancellation_token = CancellationToken::new();
+    // TODO: implement configuration for PortsPool, meanwhile we are using NatTable default to avoid configuration
+    // let ports_pool = PortsPool::new(min_port, max_port);
+    let nat_table = NatTable::default();
+    let shared_nat_table = Arc::new(TkRwLock::new(nat_table))
+        as Arc<TkRwLock<dyn NatTableManager + 'static + Send + Sync>>;
+
+    let backends_manager = Backends::default();
+    let shared_backends = Arc::new(TkRwLock::new(backends_manager));
+
+    let (nat_table_manager, address_provider) = build_connections_manager(
+        shared_nat_table,
+        Arc::clone(&shared_backends) as Arc<TkRwLock<dyn BackendSelector + 'static + Send + Sync>>,
+    );
+
+    let cloned_cancel_token = cancellation_token.clone();
+    fut_joinset.spawn(async move {
+        nat_table_manager(cloned_cancel_token).await?;
+        Ok(())
+    });
+
+    let cloned_cancel_token = cancellation_token.clone();
+    fut_joinset.spawn(async move {
+        let ctrl_c = signal::ctrl_c();
+        ctrl_c.await?;
+
+        cloned_cancel_token.cancel();
+        Ok(())
+    });
+
+    fut_joinset.spawn(async { run_af_xdp_socket(cancellation_token, address_provider).await });
+
     println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
+    while let Some(fut) = fut_joinset.join_next().await {
+        fut??;
+    }
     println!("Exiting...");
 
     Ok(())
 }
 
-async fn run_af_xdp_socket() -> anyhow::Result<()> {
+async fn run_af_xdp_socket(
+    cancellation_token: CancellationToken,
+    address_provider: AddressProvider,
+) -> anyhow::Result<()> {
     let opt: Opt = Opt::parse();
     let Opt {
         iface,
@@ -125,7 +160,13 @@ async fn run_af_xdp_socket() -> anyhow::Result<()> {
     let mut joinset = Vec::new();
 
     for queue in 0..queues {
-        joinset.push(build_thread_tx_loop(queue, &iface, Arc::clone(&xsk_map))?);
+        joinset.push(build_thread_tx_loop(
+            queue,
+            &iface,
+            Arc::clone(&xsk_map),
+            cancellation_token.clone(),
+            address_provider.clone(),
+        )?);
     }
 
     for handle in joinset {
@@ -139,32 +180,54 @@ fn build_thread_tx_loop(
     queue: u64,
     iface: impl AsRef<str>,
     xsk_map: Arc<RwLock<XskMap<MapData>>>,
+    cancellation_token: CancellationToken,
+    address_provider: AddressProvider,
 ) -> anyhow::Result<std::thread::JoinHandle<anyhow::Result<()>>> {
     let iface = iface.as_ref().to_string();
 
     let task = move || {
-        let mut aligned_memory = PageAlignedMemory::alloc(FRAME_SIZE, FRAME_COUNT)
-            .expect("failed to allocate page aligned memory");
-
+        // TODO: move network_device creation outside of the loop and clone it for each thread.
         let network_device = NetworkDevice::new(&iface).expect("failed to find the network device");
-
         let queue_id = QueueId(queue);
-        let ring_sizes = RingSizes {
-            rx: RING_SIZE,
-            tx: RING_SIZE,
-        };
 
-        let device_queue = DeviceQueue::new(network_device.if_index(), queue_id, Some(ring_sizes));
-        let umem = SliceUmem::new(&mut aligned_memory, FRAME_SIZE as u32)?;
+        let device_queue = network_device
+            .open_queue(queue_id)
+            .expect("failed to open queue for AF_XDP socket");
+
+        let RingSizes {
+            rx: rx_size,
+            tx: tx_size,
+        } = device_queue.ring_sizes().unwrap_or_else(|| {
+            log::info!(
+                "using default ring sizes for {} queue {queue_id:?}",
+                network_device.name()
+            );
+            RingSizes::default()
+        });
+
+        let frame_count = (rx_size + tx_size) * 2;
+        let frame_size = unsafe { sysconf(_SC_PAGESIZE) } as usize;
+
+        // try to allocate huge pages first, then fall back to regular pages
+        const HUGE_2MB: usize = 2 * 1024 * 1024;
+        let mut aligned_memory =
+            PageAlignedMemory::alloc_with_page_size(frame_size, frame_count, HUGE_2MB, true)
+                .or_else(|_| {
+                    log::warn!("huge page alloc failed, falling back to regular page size");
+                    PageAlignedMemory::alloc(frame_size, frame_count)
+                })
+                .unwrap();
+
+        let umem = SliceUmem::new(&mut aligned_memory, frame_size as u32)?;
 
         let (mut socket, rx, tx) = Socket::new(
             device_queue,
             umem,
             false,
-            RING_SIZE,
-            RING_SIZE,
-            RING_SIZE,
-            RING_SIZE,
+            rx_size * 2,
+            rx_size,
+            tx_size * 2,
+            tx_size,
         )?;
 
         {
@@ -174,7 +237,7 @@ fn build_thread_tx_loop(
             xsk_map.set(queue as u32, socket.as_fd(), 0)?;
         }
 
-        let mut frames_manager = FramesManager::new();
+        let mut frames_manager = FramesManager::build_with_capacity(frame_count);
 
         let umem = socket.umem();
         frames_manager
@@ -187,11 +250,15 @@ fn build_thread_tx_loop(
         insert_frames_fill_ring(&mut fill_ring, &mut frames_manager);
         fill_ring.sync(false);
 
-        let mut rx_ring = rx.ring.unwrap();
-        let mut tx_ring = tx.ring.unwrap();
+        let mut rx_ring = rx
+            .ring
+            .unwrap_or_else(|| panic!("RX ring is not available in queue: {}", queue));
+        let mut tx_ring = tx
+            .ring
+            .unwrap_or_else(|| panic!("TX ring is not available in queue: {}", queue));
         rx_ring.sync(false);
 
-        loop {
+        while !cancellation_token.is_cancelled() {
             rx_ring.sync(false);
             tx_ring.sync(false);
 
@@ -215,19 +282,19 @@ fn build_thread_tx_loop(
 
             let received_pkts = receive_packets(batch_size, &mut rx_ring);
 
-            let processed_pkts = process_packets(received_pkts, umem);
+            rx_ring.commit();
+
+            let processed_pkts = process_packets(received_pkts, umem, &address_provider);
 
             send_packets(&mut tx_ring, processed_pkts, umem);
-
-            rx_ring.commit();
 
             // Completion Ring
             release_cq_frames(umem, &mut completion_ring);
 
             // Frame recycling
             recycle_frames(umem, &mut fill_ring, &mut frames_manager)?;
-            std::thread::sleep(std::time::Duration::from_millis(2000));
         }
+        Ok(())
     };
     let thread_handle = spawn(task);
     // });

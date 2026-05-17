@@ -1,29 +1,29 @@
 #![allow(clippy::arithmetic_side_effects)]
 
-use {
-    crate::{
-        device::{NetworkDevice, QueueId, RingSizes},
-        netlink::MacAddress,
-        packet::{
-            write_eth_header, write_ip_header, write_udp_header, ETH_HEADER_SIZE, IP_HEADER_SIZE,
-            UDP_HEADER_SIZE,
-        },
-        route::Router,
-        set_cpu_affinity,
-        socket::{Socket, Tx, TxRing},
-        umem::{Frame as _, PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem as _},
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    thread,
+    time::Duration,
+};
+
+use caps::{
+    CapSet,
+    Capability::{CAP_NET_ADMIN, CAP_NET_RAW},
+};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use libc::{sysconf, _SC_PAGESIZE};
+
+use crate::{
+    device::{NetworkDevice, QueueId, RingSizes},
+    netlink::MacAddress,
+    packet::{
+        write_eth_header, write_ip_header, write_udp_header, ETH_HEADER_SIZE, IP_HEADER_SIZE,
+        UDP_HEADER_SIZE,
     },
-    caps::{
-        CapSet,
-        Capability::{CAP_NET_ADMIN, CAP_NET_RAW},
-    },
-    crossbeam_channel::{Receiver, Sender, TryRecvError},
-    libc::{sysconf, _SC_PAGESIZE},
-    std::{
-        net::{IpAddr, Ipv4Addr, SocketAddr},
-        thread,
-        time::Duration,
-    },
+    route::Router,
+    set_cpu_affinity,
+    socket::{Socket, Tx, TxRing},
+    umem::{Frame as _, PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem as _},
 };
 
 #[allow(clippy::too_many_arguments)]

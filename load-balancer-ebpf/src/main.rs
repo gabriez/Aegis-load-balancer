@@ -6,9 +6,10 @@ use core::mem;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{xdp::XskMap, Array, HashMap},
+    maps::{xdp::XskMap, HashMap},
     programs::XdpContext,
 };
+use aya_log_ebpf::info;
 use load_balancer_common::{MAX_BLOCKLIST_ENTRIES, MIN_IPV4_HEADER_LEN};
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -66,6 +67,31 @@ fn try_load_balancer(ctx: XdpContext) -> Result<u32, ()> {
 
             let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + ipv4hdr_len)?;
             let port = unsafe { u16::from_be((*tcphdr).source) };
+
+            let flag_psh = unsafe { (*tcphdr).psh() };
+            let flag_syn = unsafe { (*tcphdr).syn() };
+            let flag_ack = unsafe { (*tcphdr).ack() };
+            let flag_ece = unsafe { (*tcphdr).ece() };
+            let flag_fin = unsafe { (*tcphdr).fin() };
+            let flag_cwr = unsafe { (*tcphdr).cwr() };
+
+            info!(
+                &ctx,
+                "port src: {}
+            psh flag: {} \n 
+            syn flag: {} \n 
+            ack flag: {} \n 
+            flag_ece: {} \n 
+            flag_fin: {} \n 
+            flag_cwr: {} \n",
+                port,
+                flag_psh,
+                flag_syn,
+                flag_ack,
+                flag_ece,
+                flag_fin,
+                flag_cwr
+            );
 
             if port == 1299 {
                 let queue_id = unsafe { (*ctx.ctx).rx_queue_index };

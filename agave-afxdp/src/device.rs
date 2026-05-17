@@ -1,23 +1,23 @@
-use {
-    crate::{
-        netlink::MacAddress,
-        route::Router,
-        umem::{Frame, FrameOffset},
-    },
-    libc::{
-        ifreq, mmap, munmap, socket, syscall, xdp_ring_offset, SYS_ioctl, AF_INET, IF_NAMESIZE,
-        SIOCETHTOOL, SIOCGIFADDR, SIOCGIFHWADDR, SOCK_DGRAM, XDP_RING_NEED_WAKEUP,
-    },
-    std::{
-        ffi::{c_char, CStr, CString},
-        io::{self, ErrorKind},
-        marker::PhantomData,
-        mem,
-        net::Ipv4Addr,
-        os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd},
-        ptr, slice,
-        sync::atomic::{AtomicU32, Ordering},
-    },
+use std::{
+    ffi::{c_char, CStr, CString},
+    io::{self, ErrorKind},
+    marker::PhantomData,
+    mem,
+    net::Ipv4Addr,
+    os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd},
+    ptr, slice,
+    sync::atomic::{AtomicU32, Ordering},
+};
+
+use libc::{
+    ifreq, mmap, munmap, socket, syscall, xdp_ring_offset, SYS_ioctl, AF_INET, IF_NAMESIZE,
+    SIOCETHTOOL, SIOCGIFADDR, SIOCGIFHWADDR, SOCK_DGRAM, XDP_RING_NEED_WAKEUP,
+};
+
+use crate::{
+    netlink::MacAddress,
+    route::Router,
+    umem::{Frame, FrameOffset},
 };
 
 #[derive(Copy, Clone, Debug)]

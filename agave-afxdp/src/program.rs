@@ -1,8 +1,9 @@
 #![allow(clippy::arithmetic_side_effects)]
 
+use std::io::{Cursor, Write};
+
 #[cfg(target_os = "linux")]
 use aya::{programs::Xdp, Ebpf};
-use std::io::{Cursor, Write};
 
 macro_rules! write_fields {
     ($w:expr, $($x:expr),*) => {

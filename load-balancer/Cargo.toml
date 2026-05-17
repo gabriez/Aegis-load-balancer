@@ -16,6 +16,8 @@ log = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "fs", "rt-multi-thread", "net", "signal", "time", "sync", "test-util"] }
 network-types = { workspace = true }
 internet-checksum = "0.2.1"
+tokio-util = "0.7.18"
+fastrand = "2.3.0"
 
 clap = { workspace = true, features = ["derive"] }
 thiserror.workspace = true

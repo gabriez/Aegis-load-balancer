@@ -25,9 +25,10 @@ pub mod tx_loop;
 #[cfg(target_os = "linux")]
 pub mod umem;
 
+use std::io;
+
 #[cfg(target_os = "linux")]
 pub use program::load_xdp_program;
-use std::io;
 
 #[cfg(target_os = "linux")]
 pub fn set_cpu_affinity(cpus: impl IntoIterator<Item = usize>) -> Result<(), io::Error> {

@@ -1,13 +1,13 @@
-use {
-    crate::netlink::{
-        netlink_get_neighbors, netlink_get_routes, MacAddress, NeighborEntry, RouteEntry,
-    },
-    libc::{AF_INET, AF_INET6},
-    std::{
-        io,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    },
-    thiserror::Error,
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
+
+use libc::{AF_INET, AF_INET6};
+use thiserror::Error;
+
+use crate::netlink::{
+    netlink_get_neighbors, netlink_get_routes, MacAddress, NeighborEntry, RouteEntry,
 };
 
 #[derive(Debug, Error)]

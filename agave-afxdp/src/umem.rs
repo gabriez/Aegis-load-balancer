@@ -1,16 +1,16 @@
 #![allow(clippy::arithmetic_side_effects)]
 
-use {
-    crate::device::XdpDesc,
-    libc::{munmap, sysconf, _SC_PAGESIZE},
-    std::{
-        ffi::c_void,
-        io,
-        marker::PhantomData,
-        ops::{Deref, DerefMut},
-        ptr, slice,
-    },
+use std::{
+    ffi::c_void,
+    io,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    ptr, slice,
 };
+
+use libc::{munmap, sysconf, _SC_PAGESIZE};
+
+use crate::device::XdpDesc;
 
 #[derive(Copy, Clone, Debug)]
 pub struct FrameOffset(pub(crate) usize);

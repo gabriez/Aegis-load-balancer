@@ -7,7 +7,10 @@ use agave_afxdp::{
 use log::warn;
 use thiserror::Error;
 
-use crate::tcp_connections_handler::{route_packet, shift_mac};
+use crate::{
+    connections_manager::RouteAddress,
+    router::{get_mut_headers, route_packet, shift_mac},
+};
 
 pub const FRAME_COUNT: usize = 4096;
 pub const PACKETS_BATCH: usize = 64;
@@ -119,8 +122,10 @@ pub fn receive_packets<'a>(
 
 #[inline(always)]
 pub fn process_packets<'a>(
+    // address_provider: &impl AddressProvider,
     mut received: PacketsBatch<'a>,
     umem: &mut SliceUmem<'a>,
+    address_provider: &impl RouteAddress,
 ) -> PacketsBatch<'a> {
     let mut routed: PacketsBatch = [const { None }; PACKETS_BATCH];
 
@@ -128,13 +133,25 @@ pub fn process_packets<'a>(
         if let Some(frame) = packet.take() {
             let frame_data = umem.map_frame_mut(&frame);
 
-            if route_packet(frame_data, [192, 168, 0, 241], 8000) {
-                shift_mac(frame_data);
-                routed[index] = Some(frame);
-            } else {
-                // TODO: Implement statistic for packets dropped and bytes dropped
-                umem.release(frame.offset());
+            if let Some((eth_hdr, ipv4_hdr, tcp_hdr)) = get_mut_headers(frame_data) {
+                if let Some(redirection_address) =
+                    address_provider.get_redirection_addr(ipv4_hdr, tcp_hdr)
+                {
+                    shift_mac(eth_hdr);
+                    route_packet(
+                        ipv4_hdr,
+                        tcp_hdr,
+                        redirection_address.dest_ip,
+                        redirection_address.dest_port,
+                        redirection_address.origin_port,
+                    );
+                    routed[index] = Some(frame);
+                    continue;
+                }
             }
+            // TODO: Implement statistic for packets dropped and bytes dropped
+
+            umem.release(frame.offset());
         } else {
             // We allow to break the loop when we find the first None packet because receive_packets fills the array sequentially
             break;

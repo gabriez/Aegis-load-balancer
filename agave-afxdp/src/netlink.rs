@@ -1,23 +1,22 @@
 #![allow(clippy::arithmetic_side_effects)]
 
-use {
-    libc::{
-        getsockname, nlattr, nlmsgerr, nlmsghdr, recv, send, setsockopt, sockaddr_nl, socket,
-        AF_INET, AF_INET6, AF_NETLINK, NDA_DST, NDA_LLADDR, NETLINK_EXT_ACK, NETLINK_ROUTE,
-        NLA_ALIGNTO, NLA_TYPE_MASK, NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI,
-        NLM_F_REQUEST, NUD_PERMANENT, NUD_REACHABLE, NUD_STALE, RTA_DST, RTA_GATEWAY, RTA_IIF,
-        RTA_OIF, RTA_PREFSRC, RTA_PRIORITY, RTA_TABLE, RTM_GETNEIGH, RTM_GETROUTE, RTM_NEWNEIGH,
-        RTM_NEWROUTE, RT_TABLE_MAIN, SOCK_RAW, SOL_NETLINK,
-    },
-    std::{
-        collections::HashMap,
-        io, mem,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
-        os::fd::{AsRawFd, FromRawFd, OwnedFd},
-        ptr, slice,
-    },
-    thiserror::Error,
+use std::{
+    collections::HashMap,
+    io, mem,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    ptr, slice,
 };
+
+use libc::{
+    getsockname, nlattr, nlmsgerr, nlmsghdr, recv, send, setsockopt, sockaddr_nl, socket, AF_INET,
+    AF_INET6, AF_NETLINK, NDA_DST, NDA_LLADDR, NETLINK_EXT_ACK, NETLINK_ROUTE, NLA_ALIGNTO,
+    NLA_TYPE_MASK, NLMSG_DONE, NLMSG_ERROR, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST, NUD_PERMANENT,
+    NUD_REACHABLE, NUD_STALE, RTA_DST, RTA_GATEWAY, RTA_IIF, RTA_OIF, RTA_PREFSRC, RTA_PRIORITY,
+    RTA_TABLE, RTM_GETNEIGH, RTM_GETROUTE, RTM_NEWNEIGH, RTM_NEWROUTE, RT_TABLE_MAIN, SOCK_RAW,
+    SOL_NETLINK,
+};
+use thiserror::Error;
 
 const NLA_HDR_LEN: usize = align_to(mem::size_of::<nlattr>(), NLA_ALIGNTO as usize);
 

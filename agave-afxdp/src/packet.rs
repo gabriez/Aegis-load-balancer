@@ -1,6 +1,8 @@
 #![allow(clippy::arithmetic_side_effects)]
 
-use {libc::ETH_P_IP, std::net::Ipv4Addr};
+use std::net::Ipv4Addr;
+
+use libc::ETH_P_IP;
 
 pub const ETH_HEADER_SIZE: usize = 14;
 pub const IP_HEADER_SIZE: usize = 20;
