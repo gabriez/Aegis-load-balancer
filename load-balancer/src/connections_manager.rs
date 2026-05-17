@@ -31,7 +31,7 @@ impl PortsPool {
         let mut ports = Vec::with_capacity(capacity);
 
         for i in 0..capacity {
-            ports.push(Some((min_port + i as u16).to_be() as u16));
+            ports.push(Some((min_port + i as u16).to_be()));
         }
         Self {
             max_ports: capacity,
@@ -567,7 +567,7 @@ impl AddressProvider {
     ) -> Option<RedirectionAddress> {
         let origin = self.check_origin(ipv4_hdr.src_addr, tcp_hdr.source);
 
-        let flags = unsafe { ::core::mem::transmute(tcp_hdr._bitfield_1.get(8usize, 8u8) as u8) };
+        let flags = unsafe { ::core::mem::transmute(tcp_hdr._bitfield_1.get(8usize, 8u8)) };
 
         match origin {
             PacketOrigin::Client => {

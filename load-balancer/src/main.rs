@@ -252,10 +252,10 @@ fn build_thread_tx_loop(
 
         let mut rx_ring = rx
             .ring
-            .expect(&format!("RX ring is not available in queue: {}", queue));
+            .unwrap_or_else(|| panic!("RX ring is not available in queue: {}", queue));
         let mut tx_ring = tx
             .ring
-            .expect(&format!("TX ring is not available in queue: {}", queue));
+            .unwrap_or_else(|| panic!("TX ring is not available in queue: {}", queue));
         rx_ring.sync(false);
 
         while !cancellation_token.is_cancelled() {
